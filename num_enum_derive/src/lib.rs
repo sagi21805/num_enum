@@ -259,6 +259,103 @@ pub fn derive_try_from_primitive(input: TokenStream) -> TokenStream {
     })
 }
 
+/// Implements `ConstTryFrom<Primitive>` for a `#[repr(Primitive)] enum`.
+///
+/// Attempting to turn a primitive into an enum with `try_from`.
+/// ----------------------------------------------
+///
+/// ```rust
+/// use num_enum::ConstTryFromPrimitive;
+/// use std::convert::TryFrom;
+///
+/// #[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+/// #[repr(u8)]
+/// enum Number {
+///     Zero,
+///     One,
+/// }
+///
+/// let zero = const { Number::try_from(0u8) };
+/// assert_eq!(zero, Ok(Number::Zero));
+///
+/// let three = const { Number::try_from(3u8) };
+/// assert_eq!(
+///     three.unwrap_err().to_string(),
+///     "No discriminant in enum `Number` matches the value `3`",
+/// );
+/// ```
+#[proc_macro_derive(ConstTryFromPrimitive, attributes(num_enum))]
+pub fn const_derive_try_from_primitive(input: TokenStream) -> TokenStream {
+    let enum_info: EnumInfo = parse_macro_input!(input);
+    let krate = get_crate_path(enum_info.crate_path.clone());
+    let EnumInfo {
+        ref name,
+        ref repr,
+        ref error_type_info,
+        ..
+    } = enum_info;
+
+    let variant_idents: Vec<Ident> = enum_info.variant_idents();
+    let expression_idents: Vec<Vec<Ident>> = enum_info.expression_idents();
+    let variant_expressions: Vec<Vec<Expr>> = enum_info.variant_expressions();
+
+    debug_assert_eq!(variant_idents.len(), variant_expressions.len());
+
+    let error_type = &error_type_info.name;
+    let error_constructor = &error_type_info.constructor;
+
+    TokenStream::from(quote! {
+        impl #krate::TryFromPrimitive for #name {
+            type Primitive = #repr;
+            type Error = #error_type;
+
+            const NAME: &'static str = stringify!(#name);
+
+            const fn const_try_from_primitive (
+                number: Self::Primitive,
+            ) -> ::core::result::Result<
+                Self,
+                #error_type
+            > {
+                // Use intermediate const(s) so that enums defined like
+                // `Two = ONE + 1u8` work properly.
+                #![allow(non_upper_case_globals)]
+                #(
+                    #(
+                        const #expression_idents: #repr = #variant_expressions;
+                    )*
+                )*
+                #[deny(unreachable_patterns)]
+                match number {
+                    #(
+                        #( #expression_idents )|*
+                        => ::core::result::Result::Ok(Self::#variant_idents),
+                    )*
+                    #[allow(unreachable_patterns)]
+                    _ => ::core::result::Result::Err(
+                        #error_constructor ( number )
+                    ),
+                }
+            }
+        }
+
+        impl const ::core::convert::TryFrom<#repr> for #name {
+            type Error = #error_type;
+
+            #[inline]
+            fn try_from (
+                number: #repr,
+            ) -> ::core::result::Result<Self, #error_type>
+            {
+                #krate::TryFromPrimitive::const_try_from_primitive(number)
+            }
+        }
+
+        #[doc(hidden)]
+        impl #krate::CannotDeriveBothFromPrimitiveAndTryFromPrimitive for #name {}
+    })
+}
+
 /// Generates a `unsafe fn unchecked_transmute_from(number: Primitive) -> Self`
 /// associated function.
 ///

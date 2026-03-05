@@ -10,15 +10,14 @@ use syn::{
     LitInt, Meta, Path, Result, UnOp,
 };
 
-pub(crate) struct EnumInfo {
+pub(crate) struct EnumInfo<const IS_CONST: bool = false> {
     pub(crate) name: Ident,
     pub(crate) repr: Ident,
-    pub(crate) crate_path: Option<syn::Path>,
     pub(crate) variants: Vec<VariantInfo>,
     pub(crate) error_type_info: ErrorType,
 }
 
-impl EnumInfo {
+impl<const IS_CONST: bool> EnumInfo<IS_CONST> {
     /// Returns whether the number of variants (ignoring defaults, catch-alls, etc) is the same as
     /// the capacity of the repr.
     pub(crate) fn is_naturally_exhaustive(&self) -> Result<bool> {
@@ -32,7 +31,7 @@ impl EnumInfo {
                     return Ok(false);
                 } else if let Ok(bits) = suffix.parse::<u32>() {
                     let variants = 1usize.checked_shl(bits);
-                    return Ok(variants.is_some_and(|v| {
+                    return Ok(variants.map_or(false, |v| {
                         v == self
                             .variants
                             .iter()
@@ -83,16 +82,15 @@ impl EnumInfo {
     pub(crate) fn variant_expressions(&self) -> Vec<Vec<Expr>> {
         self.variants
             .iter()
-            .filter(|variant| !variant.is_catch_all)
             .map(|variant| variant.all_values().cloned().collect())
             .collect()
     }
 
     fn parse_attrs<Attrs: Iterator<Item = Attribute>>(
         attrs: Attrs,
-    ) -> Result<(Ident, crate::enum_attributes::Attributes)> {
+    ) -> Result<(Ident, Option<ErrorType>)> {
         let mut maybe_repr = None;
-        let mut attributes = crate::enum_attributes::Attributes::default();
+        let mut maybe_error_type = None;
         for attr in attrs {
             if let Meta::List(meta_list) = &attr.meta {
                 if let Some(ident) = meta_list.path.get_ident() {
@@ -115,9 +113,14 @@ impl EnumInfo {
                             maybe_repr = Some(repr_ident);
                         }
                     } else if ident == "num_enum" {
-                        let new_attributes =
+                        let attributes =
                             attr.parse_args_with(crate::enum_attributes::Attributes::parse)?;
-                        attributes.exclusive_union(new_attributes)?;
+                        if let Some(error_type) = attributes.error_type {
+                            if maybe_error_type.is_some() {
+                                die!(attr => "At most one num_enum error_type attribute may be specified");
+                            }
+                            maybe_error_type = Some(error_type.into());
+                        }
                     }
                 }
             }
@@ -125,11 +128,11 @@ impl EnumInfo {
         if maybe_repr.is_none() {
             die!("Missing `#[repr({Integer})]` attribute");
         }
-        Ok((maybe_repr.unwrap(), attributes))
+        Ok((maybe_repr.unwrap(), maybe_error_type))
     }
 }
 
-impl Parse for EnumInfo {
+impl<const IS_CONST: bool> Parse for EnumInfo<IS_CONST> {
     fn parse(input: ParseStream) -> Result<Self> {
         Ok({
             let input: DeriveInput = input.parse()?;
@@ -140,8 +143,7 @@ impl Parse for EnumInfo {
                 Data::Struct(data) => die!(data.struct_token => "Expected enum but found struct"),
             };
 
-            let (repr, attributes) = Self::parse_attrs(input.attrs.into_iter())?;
-            let crate_path = attributes.crate_path.clone().map(|k| k.path);
+            let (repr, maybe_error_type) = Self::parse_attrs(input.attrs.into_iter())?;
 
             let mut variants: Vec<VariantInfo> = vec![];
             let mut has_default_variant: bool = false;
@@ -263,7 +265,7 @@ impl Parse for EnumInfo {
                 if !is_catch_all {
                     match &variant.fields {
                         Fields::Named(_) | Fields::Unnamed(_) => {
-                            die!(variant => format!("`{}` only supports unit variants (with no associated data), but `{}::{}` was not a unit variant.", crate_path_as_string(&get_crate_path(crate_path))?, name, ident));
+                            die!(variant => format!("`{}` only supports unit variants (with no associated data), but `{}::{}` was not a unit variant.", get_crate_name(), name, ident));
                         }
                         Fields::Unit => {}
                     }
@@ -382,15 +384,26 @@ impl Parse for EnumInfo {
                 }
             }
 
-            let error_type_info = attributes.error_type.map(Into::into).unwrap_or_else(|| {
-                let crate_name = get_crate_path(crate_path.clone());
-                ErrorType {
-                    name: parse_quote! {
-                        #crate_name::TryFromPrimitiveError<Self>
-                    },
-                    constructor: parse_quote! {
-                        #crate_name::TryFromPrimitiveError::<Self>::new
-                    },
+            let error_type_info = maybe_error_type.unwrap_or_else(|| {
+                let crate_name = Ident::new(&get_crate_name(), Span::call_site());
+                if IS_CONST {
+                    ErrorType {
+                        name: parse_quote! {
+                            ::#crate_name::ConstTryFromPrimitiveError<Self>
+                        },
+                        constructor: parse_quote! {
+                            ::#crate_name::ConstTryFromPrimitiveError::<Self>::new
+                        },
+                    }
+                } else {
+                    ErrorType {
+                        name: parse_quote! {
+                            ::#crate_name::TryFromPrimitiveError<Self>
+                        },
+                        constructor: parse_quote! {
+                            ::#crate_name::TryFromPrimitiveError::<Self>::new
+                        },
+                    }
                 }
             });
 
@@ -398,7 +411,6 @@ impl Parse for EnumInfo {
                 name,
                 repr,
                 variants,
-                crate_path,
                 error_type_info,
             }
         })
@@ -528,22 +540,18 @@ impl From<ErrorTypeAttribute> for ErrorType {
 }
 
 #[cfg(feature = "proc-macro-crate")]
-pub(crate) fn get_crate_path(path: Option<syn::Path>) -> syn::Path {
-    path.unwrap_or_else(|| {
-        let found_crate = proc_macro_crate::crate_name("num_enum").unwrap_or_else(|err| {
-            eprintln!("Warning: {}\n    => defaulting to `num_enum`", err,);
-            proc_macro_crate::FoundCrate::Itself
-        });
+pub(crate) fn get_crate_name() -> String {
+    let found_crate = proc_macro_crate::crate_name("num_enum").unwrap_or_else(|err| {
+        eprintln!("Warning: {}\n    => defaulting to `num_enum`", err,);
+        proc_macro_crate::FoundCrate::Itself
+    });
 
-        match found_crate {
-            proc_macro_crate::FoundCrate::Itself => parse_quote!(::num_enum),
-            proc_macro_crate::FoundCrate::Name(name) => {
-                let krate = format_ident!("{}", name);
-                parse_quote!( ::#krate )
-            }
-        }
-    })
+    match found_crate {
+        proc_macro_crate::FoundCrate::Itself => String::from("num_enum"),
+        proc_macro_crate::FoundCrate::Name(name) => name,
+    }
 }
+
 // Don't depend on proc-macro-crate in no_std environments because it causes an awkward dependency
 // on serde with std.
 //
@@ -551,20 +559,6 @@ pub(crate) fn get_crate_path(path: Option<syn::Path>) -> syn::Path {
 //
 // See https://github.com/illicitonion/num_enum/issues/18
 #[cfg(not(feature = "proc-macro-crate"))]
-pub(crate) fn get_crate_path(path: Option<syn::Path>) -> syn::Path {
-    path.unwrap_or_else(|| parse_quote!(::num_enum))
-}
-
-fn crate_path_as_string(path: &syn::Path) -> Result<String> {
-    let mut string = String::new();
-    for (index, part) in path.segments.iter().enumerate() {
-        if index != 0 || path.leading_colon.is_some() {
-            string.push_str("::");
-        }
-        if !part.arguments.is_none() {
-            die!(part => format!("Crate paths should never contain arguments"));
-        }
-        string.push_str(&format!("{}", part.ident));
-    }
-    Ok(string)
+pub(crate) fn get_crate_name() -> String {
+    String::from("num_enum")
 }

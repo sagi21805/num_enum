@@ -102,30 +102,25 @@ fn exhaustive_clause(arg: Ident, that_repr: &Ident) -> proc_macro2::TokenStream 
 /// ```
 #[proc_macro_derive(ConstIntoPrimitive, attributes(num_enum, catch_all))]
 pub fn derive_const_into_primitive(input: TokenStream) -> TokenStream {
-    let input2 = input.clone();
     let enum_info = parse_macro_input!(input as EnumInfo);
     let catch_all = enum_info.catch_all();
     let name = &enum_info.name;
     let repr = &enum_info.repr;
 
-    let arg = Ident::new("self", Span::call_site());
+    let arg = Ident::new("enum_value", Span::call_site());
     let body = if let Some(catch_all_ident) = catch_all {
         catch_all_clause(arg, name, repr, catch_all_ident)
     } else {
         exhaustive_clause(arg, repr)
     };
 
-    let non_const_impl: proc_macro2::TokenStream = derive_into_primitive(input2).into();
-
     TokenStream::from(quote! {
-        #non_const_impl
-
-        impl #name {
-          #[inline]
-          pub const fn const_into(self) -> #repr
-          {
+        impl const ::core::convert::From<#name> for #repr {
+            #[inline]
+            fn from (enum_value: #name) -> Self
+            {
                 #body
-          }
+            }
         }
     })
 }

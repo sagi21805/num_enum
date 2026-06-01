@@ -311,6 +311,15 @@ pub fn derive_const_from_primitive(input: TokenStream) -> TokenStream {
             }
         }
 
+        impl const ::core::convert::From<#repr> for #name {
+            #[inline]
+            fn from (
+                number: #repr,
+            ) -> Self {
+                Self::const_from(number)
+            }
+        }
+
         #[doc(hidden)]
         impl ::#krate::CannotDeriveBothConstFromPrimitiveAndConstTryFromPrimitive for #name {}
     })

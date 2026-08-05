@@ -115,7 +115,7 @@ pub fn derive_const_into_primitive(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(quote! {
-        impl const ::core::convert::From<#name> for #repr {
+        const impl ::core::convert::From<#name> for #repr {
             #[inline]
             fn from (enum_value: #name) -> Self
             {
@@ -311,7 +311,7 @@ pub fn derive_const_from_primitive(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl const ::core::convert::From<#repr> for #name {
+        const impl ::core::convert::From<#repr> for #name {
             #[inline]
             fn from (
                 number: #repr,
@@ -507,7 +507,7 @@ pub fn derive_const_try_from_primitive(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl const ::core::convert::TryFrom<#repr> for #name {
+        const impl ::core::convert::TryFrom<#repr> for #name {
             type Error = #error_type;
 
             #[inline]
